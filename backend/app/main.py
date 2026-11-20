@@ -106,12 +106,23 @@ def delete_document(document_id: str, user: User=Depends(current_user), db: Sess
     if not doc or (doc.owner_id != user.id and user.role != "owner"): raise HTTPException(404,"Document not found")
     from qdrant_client import QdrantClient, models
     q=QdrantClient(url=settings.qdrant_url)
-    q.delete(collection_name=settings.qdrant_collection, points_selector=models.FilterSelector(filter=models.Filter(must=[
-        models.FieldCondition(key="tenant_id",match=models.MatchValue(value=user.tenant_id)),
-        models.FieldCondition(key="document_id",match=models.MatchValue(value=document_id))])))
-    try: ensure_bucket().delete_object(Bucket=settings.s3_bucket,Key=doc.object_key)
-    except Exception: pass
-    db.delete(doc); db.commit()
+    try:
+        # External cleanup is idempotent: if S3 or the DB transaction fails,
+        # the document row remains and this endpoint can safely be retried.
+        q.delete(collection_name=settings.qdrant_collection, points_selector=models.FilterSelector(filter=models.Filter(must=[
+            models.FieldCondition(key="tenant_id",match=models.MatchValue(value=user.tenant_id)),
+            models.FieldCondition(key="document_id",match=models.MatchValue(value=document_id))])))
+        ensure_bucket().delete_object(Bucket=settings.s3_bucket,Key=doc.object_key)
+        db.query(Membership).filter_by(
+            tenant_id=user.tenant_id, document_id=document_id
+        ).delete(synchronize_session=False)
+        db.delete(doc)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(502, "Document cleanup failed; the document record was retained so cleanup can be retried") from exc
+    finally:
+        q.close()
     return {"deleted":document_id}
 
 @app.post("/documents/{document_id}/share")
