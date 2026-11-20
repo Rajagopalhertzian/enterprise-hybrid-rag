@@ -6,6 +6,7 @@ on:
     paths: ['backend/**','modal_app.py','requirements.txt']
 jobs:
   deploy:
+    environment: rag-v2-secrets
     if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
